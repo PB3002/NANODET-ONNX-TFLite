@@ -72,7 +72,7 @@ def inference(interpreter, origin_img, args):
 
     results = post_process(output[0], len(class_names), 7, args.input_shape)
 
-    result_image = visualize(results[0], origin_img, class_names, 0.35)
+    result_image = visualize(results[0], origin_img, class_names, args.score_thr)
 
     return result_image
 
