@@ -63,11 +63,11 @@ def make_parser():
         help="Specify the input shape for inference (height,width).",
     )
     parser.add_argument(
-        "--classes", # Renamed from --filter_classes
-        nargs='+', # Allows one or more class names
+        "--classes",
+        nargs='+',
         type=str,
-        default=None, # Default handled in main block now
-        help="Optional list of class names to filter results for (e.g., person car bus). If not provided, defaults to 'person'.",
+        default=None,
+        help="Optional list of class names to filter results for (e.g., person car bus). If not provided, defaults to 'person'. If model is single-class, providing one name here will override the default 'object' name.",
     )
     return parser
 
@@ -92,10 +92,13 @@ def detect_model_parameters(interpreter, input_shape, reg_max):
         logger.exception("Detailed traceback:")
         return None, None
 
-def get_class_names(num_classes):
-    """Provides class names based on the detected number of classes."""
+def get_default_class_names(num_classes):
+    """Provides default class names (COCO or generic) based on the detected number of classes."""
+    # This function is now only for default names when user doesn't override single-class name
     if num_classes == 1:
-        logger.info("Using default class name 'object' for single-class model.")
+        # This case should ideally be handled by the override logic in main
+        # but keep a fallback name here.
+        logger.info("Using default class name 'object' for single-class model (fallback)." )
         return ['object']
     elif num_classes == 80:
         logger.info("Using COCO class names for 80-class model.")
@@ -142,10 +145,13 @@ def benchmark_inference(interpreter, image_path, input_shape, score_threshold, n
 
         t_start_postprocess = time.perf_counter()
         try:
+            # Use the provided num_classes, reg_max, and class_names
             results = post_process(output[0], num_classes, reg_max, input_shape)
             filtered_results = filter_results_by_class(results, filter_class_indices)
+
             if filtered_results and 0 in filtered_results and filtered_results[0]:
                  logger.debug(f"Visualizing filtered detections for {len(filtered_results[0])} classes.")
+                 # Pass the potentially overridden class_names list to visualize
                  result_image = visualize(filtered_results[0], origin_img.copy(), class_names, score_threshold)
             else:
                  logger.debug(f"No detections found after filtering or postprocessing returned empty for {image_path}")
@@ -172,14 +178,6 @@ if __name__ == '__main__':
     args.input_shape = tuple(map(int, args.input_shape.split(',')))
     reg_max = DEFAULT_REG_MAX
 
-    requested_classes = args.classes # Store originally requested classes
-    if requested_classes is None:
-        logger.info("No --classes specified, defaulting to ['person'].")
-        requested_classes = ['person']
-        is_default_person = True
-    else:
-        is_default_person = False
-
     logger.info(f"Loading ONNX model from: {args.model}")
     try:
         interpreter = onnxruntime.InferenceSession(args.model, providers=['CPUExecutionProvider'])
@@ -192,45 +190,69 @@ if __name__ == '__main__':
     if num_classes is None:
         logger.error("Exiting due to failure in detecting model parameters.")
         exit()
-    
-    class_names = get_class_names(num_classes)
+
+    # --- Determine Class Names (handle single-class override) --- 
+    user_provided_classes = args.classes
+    user_provided_single_class_name = None
+    if user_provided_classes and len(user_provided_classes) == 1:
+        user_provided_single_class_name = user_provided_classes[0]
+
+    if num_classes == 1 and user_provided_single_class_name:
+        logger.info(f"Detected single-class model. Using user-provided name: '{user_provided_single_class_name}'")
+        class_names = [user_provided_single_class_name]
+    else:
+        # Use default logic (COCO or generic) if multi-class or user didn't provide a single specific name
+        class_names = get_default_class_names(num_classes)
+        if num_classes == 1 and user_provided_classes and len(user_provided_classes) > 1:
+             logger.warning(f"User provided multiple class names ({user_provided_classes}) but model is single-class. Using default name '{class_names[0]}'.")
+        elif num_classes == 1 and not user_provided_classes:
+             logger.info(f"Detected single-class model and no classes specified. Using default name '{class_names[0]}'.")
+
     class_name_to_id = {name: i for i, name in enumerate(class_names)}
 
-    # --- Process --classes argument with fallback logic --- 
+    # --- Determine classes to filter for --- 
+    target_classes_for_filtering = []
+    if args.classes is None: # No --classes arg provided
+        default_target = 'person'
+        if default_target in class_name_to_id:
+             logger.info(f"No --classes specified, defaulting to ['{default_target}'].")
+             target_classes_for_filtering = [default_target]
+        elif num_classes == 1:
+             # If default 'person' isn't valid, but it's a single class model, use its assigned name
+             single_class_name = class_names[0]
+             logger.info(f"No --classes specified, default '{default_target}' invalid for this model. Defaulting to the single class: ['{single_class_name}'].")
+             target_classes_for_filtering = [single_class_name]
+        else:
+             logger.error(f"No --classes specified, and default '{default_target}' is not valid for this multi-class model. Cannot determine default filter.")
+             logger.error(f"Please specify classes using --classes. Valid names: {', '.join(class_names)}")
+             exit()
+    else: # --classes arg was provided
+        target_classes_for_filtering = args.classes
+
+    # --- Validate and get indices for the target filter classes --- 
     filter_class_indices = set()
+    final_filter_classes_names = []
     invalid_classes = []
     valid_classes_found = False
-    logger.info(f"Attempting to filter for requested classes: {requested_classes}")
-    
-    # Check for fallback: single class model and 'person' was requested (default or explicit)
-    if num_classes == 1 and 'person' in requested_classes and 'person' not in class_name_to_id:
-        single_class_name = class_names[0]
-        logger.warning(f"Model has only 1 class ('{single_class_name}'). Requested 'person' is invalid.")
-        logger.warning(f"Automatically falling back to filter for the single detected class: '{single_class_name}'.")
-        filter_class_indices.add(0) # Add index 0 for the single class
-        valid_classes_found = True
-        # Remove 'person' from invalid list if it was the only one requested
-        if 'person' in invalid_classes:
-             invalid_classes.remove('person')
-    else:
-        # Normal processing for multi-class or if fallback didn't apply
-        for name in requested_classes:
-            if name in class_name_to_id:
-                filter_class_indices.add(class_name_to_id[name])
-                valid_classes_found = True
-            else:
-                invalid_classes.append(name)
+    logger.info(f"Attempting to filter for target classes: {target_classes_for_filtering}")
+    for name in target_classes_for_filtering:
+        if name in class_name_to_id:
+            filter_class_indices.add(class_name_to_id[name])
+            final_filter_classes_names.append(name)
+            valid_classes_found = True
+        else:
+            invalid_classes.append(name)
 
     if invalid_classes:
         logger.warning(f"Invalid class names provided for filtering: {', '.join(invalid_classes)}. Ignoring them.")
         logger.warning(f"Valid class names for this model are: {', '.join(class_names)}")
-        
+
     if not valid_classes_found:
-        logger.error("No valid classes specified or found after fallback. Cannot proceed.")
+        logger.error("No valid classes specified or found for filtering. Cannot proceed.")
         logger.error(f"Please provide valid class names from: {', '.join(class_names)}")
         exit()
     else:
-         logger.info(f"Successfully set filter for classes: {[class_names[i] for i in filter_class_indices]} (Indices: {filter_class_indices})")
+         logger.info(f"Successfully set filter for classes: {final_filter_classes_names} (Indices: {filter_class_indices})")
 
     # --- Dataset and Output Path Setup --- 
     if not os.path.isdir(args.dataset_path):
@@ -287,13 +309,13 @@ if __name__ == '__main__':
 
         logger.info("--- Benchmark Results ---")
         logger.info(f"Model: {os.path.basename(args.model)}")
-        logger.info(f"Detected Classes: {num_classes}")
+        logger.info(f"Detected Classes: {num_classes} ({', '.join(class_names)})") # Show assigned names
         logger.info(f"Total Images Found: {len(image_files)}")
         logger.info(f"Images Processed (Attempted): {processed_image_count}")
         logger.info(f"Images Successfully Benchmarked: {successful_processing_count}")
         logger.info(f"Input Shape: {args.input_shape}")
         logger.info(f"Score Threshold: {args.score_thr}")
-        logger.info(f"Filtered Classes: {[class_names[i] for i in filter_class_indices]}")
+        logger.info(f"Filtered Classes: {final_filter_classes_names}") # Report the names used for filtering
         logger.info(f"Average Preprocessing Latency: {avg_latency_preprocess_ms:.2f} ms")
         logger.info(f"Average Inference Latency: {avg_latency_inference_ms:.2f} ms")
         logger.info(f"Average Postprocessing Latency: {avg_latency_postprocess_ms:.2f} ms")
@@ -305,4 +327,3 @@ if __name__ == '__main__':
         logger.error("No images were processed successfully. Cannot calculate benchmark results.")
 
     logger.info(f"Benchmark finished. Output images (if any) saved to: {args.output_path}")
-
