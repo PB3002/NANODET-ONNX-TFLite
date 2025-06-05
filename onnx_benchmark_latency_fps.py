@@ -26,12 +26,10 @@ COCO_CLASS_NAMES = [
 ]
 
 # Assumed reg_max for NanoDet-Plus models
-# This might need adjustment for different model types
 DEFAULT_REG_MAX = 7
 
 def make_parser():
     """Creates an argument parser for the benchmarking script."""
-    # Changed argument name and default behavior
     parser = argparse.ArgumentParser("ONNX Model Benchmark with Class Filtering (Default: Person)")
     parser.add_argument(
         "--model",
@@ -77,27 +75,18 @@ def detect_model_parameters(interpreter, input_shape, reg_max):
     """Runs a dummy inference to detect output shape and infer num_classes."""
     logger.info("Attempting to detect model parameters (num_classes)...")
     try:
-        # Create dummy input
         dummy_input = np.zeros((1, 3, input_shape[0], input_shape[1]), dtype=np.float32)
         ort_inputs = {interpreter.get_inputs()[0].name: dummy_input}
-        
-        # Run inference
         output = interpreter.run(None, ort_inputs)
         output_shape = output[0].shape
         logger.info(f"Detected model output shape: {output_shape}")
-
-        # Infer num_classes: Assumes output format [batch, num_preds, num_classes + (reg_max + 1) * 4]
-        # This calculation is specific to NanoDet-Plus output structure
         last_dim = output_shape[-1]
         num_classes = last_dim - (reg_max + 1) * 4
-        
         if num_classes <= 0:
             logger.error(f"Could not determine num_classes from output shape {output_shape} and reg_max={reg_max}. Last dim size: {last_dim}. Expected format: num_classes + (reg_max + 1) * 4.")
             return None, None
-
         logger.info(f"Auto-detected num_classes: {num_classes}")
         return num_classes, reg_max
-
     except Exception as e:
         logger.error(f"Failed during model parameter detection: {e}")
         logger.exception("Detailed traceback:")
@@ -118,94 +107,59 @@ def get_class_names(num_classes):
 def filter_results_by_class(results, filter_indices):
     """Filters the detection results dictionary to keep only specified class indices."""
     if filter_indices is None or not results:
-        # If filter_indices is None, it means we want all classes (no filtering argument provided initially)
-        # However, the logic now defaults to 'person' if no arg is given, so this case might not be hit
-        # unless the default logic changes. Keeping it for robustness.
         return results
-
     filtered_results = {}
     for batch_idx, batch_data in results.items():
         filtered_batch_data = {}
         for class_idx, detections in batch_data.items():
             if class_idx in filter_indices:
                 filtered_batch_data[class_idx] = detections
-        if filtered_batch_data: # Only add batch if it has filtered detections
+        if filtered_batch_data:
             filtered_results[batch_idx] = filtered_batch_data
     return filtered_results
 
 def benchmark_inference(interpreter, image_path, input_shape, score_threshold, num_classes, reg_max, class_names, filter_class_indices=None):
     """
     Runs inference on a single image, measures latency, and optionally filters results.
-
-    Args:
-        interpreter: The ONNX Runtime InferenceSession.
-        image_path: Path to the input image file.
-        input_shape: Tuple representing the model input shape (height, width).
-        score_threshold: The score threshold for filtering detections.
-        num_classes: Number of classes the model predicts.
-        reg_max: The reg_max value for the model.
-        class_names: List of class names corresponding to model output.
-        filter_class_indices: Optional set of class indices to keep.
-
-    Returns:
-        A tuple containing:
-        - latency_preprocess_ms: Preprocessing time in milliseconds.
-        - latency_inference_ms: Model inference time in milliseconds.
-        - latency_postprocess_ms: Postprocessing time in milliseconds.
-        - processed_image: The image with detections visualized (or None if error).
+    Args as defined in main block.
+    Returns tuple: (latency_preprocess_ms, latency_inference_ms, latency_postprocess_ms, processed_image)
     """
-    latency_preprocess_ms = None
-    latency_inference_ms = None
-    latency_postprocess_ms = None
-    result_image = None
-
+    latency_preprocess_ms, latency_inference_ms, latency_postprocess_ms, result_image = None, None, None, None
     try:
         origin_img = cv2.imread(image_path)
         if origin_img is None:
             logger.warning(f"Could not read image: {image_path}")
             return latency_preprocess_ms, latency_inference_ms, latency_postprocess_ms, result_image
 
-        # --- Preprocessing --- 
         t_start_preprocess = time.perf_counter()
         img = image_preprocess(origin_img, input_shape)
         ort_inputs = {interpreter.get_inputs()[0].name: img[None, :, :, :]}
-        t_end_preprocess = time.perf_counter()
-        latency_preprocess_ms = (t_end_preprocess - t_start_preprocess) * 1000
+        latency_preprocess_ms = (time.perf_counter() - t_start_preprocess) * 1000
 
-        # --- Inference --- 
         t_start_inference = time.perf_counter()
         output = interpreter.run(None, ort_inputs)
-        t_end_inference = time.perf_counter()
-        latency_inference_ms = (t_end_inference - t_start_inference) * 1000
+        latency_inference_ms = (time.perf_counter() - t_start_inference) * 1000
 
-        # --- Postprocessing --- 
         t_start_postprocess = time.perf_counter()
-        processed_results = None
         try:
-            # Use detected num_classes and reg_max
             results = post_process(output[0], num_classes, reg_max, input_shape)
-
-            # Filter results if filter_class_indices is provided
-            # Note: filter_class_indices will always be set (defaulting to 'person' index if needed)
             filtered_results = filter_results_by_class(results, filter_class_indices)
-
-            if filtered_results and 0 in filtered_results and filtered_results[0]: # Check if filtered results exist for batch 0
+            if filtered_results and 0 in filtered_results and filtered_results[0]:
                  logger.debug(f"Visualizing filtered detections for {len(filtered_results[0])} classes.")
                  result_image = visualize(filtered_results[0], origin_img.copy(), class_names, score_threshold)
             else:
                  logger.debug(f"No detections found after filtering or postprocessing returned empty for {image_path}")
-                 result_image = origin_img.copy() # Return original image if no detections
+                 result_image = origin_img.copy()
         except Exception as e:
             logger.error(f"Postprocessing or Filtering failed for {image_path}: {e}")
-            logger.exception("Detailed traceback:") # Log full traceback
+            logger.exception("Detailed traceback:")
             logger.error(f"Output shape was: {output[0].shape}")
-            result_image = None # Indicate error during postprocessing
-        t_end_postprocess = time.perf_counter()
-        latency_postprocess_ms = (t_end_postprocess - t_start_postprocess) * 1000
+            result_image = None
+        latency_postprocess_ms = (time.perf_counter() - t_start_postprocess) * 1000
 
     except Exception as e:
         logger.error(f"Error processing image {image_path}: {e}")
-        logger.exception("Detailed traceback:") # Log full traceback
+        logger.exception("Detailed traceback:")
         latency_preprocess_ms = latency_preprocess_ms if 't_start_preprocess' in locals() else None
         latency_inference_ms = latency_inference_ms if 't_start_inference' in locals() else None
         latency_postprocess_ms = latency_postprocess_ms if 't_start_postprocess' in locals() else None
@@ -218,10 +172,13 @@ if __name__ == '__main__':
     args.input_shape = tuple(map(int, args.input_shape.split(',')))
     reg_max = DEFAULT_REG_MAX
 
-    # --- Handle --classes argument default --- 
-    if args.classes is None:
+    requested_classes = args.classes # Store originally requested classes
+    if requested_classes is None:
         logger.info("No --classes specified, defaulting to ['person'].")
-        args.classes = ['person']
+        requested_classes = ['person']
+        is_default_person = True
+    else:
+        is_default_person = False
 
     logger.info(f"Loading ONNX model from: {args.model}")
     try:
@@ -231,32 +188,47 @@ if __name__ == '__main__':
         logger.error(f"Failed to load ONNX model: {e}")
         exit()
 
-    # --- Auto-detect model parameters --- 
     num_classes, detected_reg_max = detect_model_parameters(interpreter, args.input_shape, reg_max)
     if num_classes is None:
         logger.error("Exiting due to failure in detecting model parameters.")
         exit()
     
-    # --- Get class names based on detected number --- 
     class_names = get_class_names(num_classes)
     class_name_to_id = {name: i for i, name in enumerate(class_names)}
 
-    # --- Process --classes argument using detected class names --- 
+    # --- Process --classes argument with fallback logic --- 
     filter_class_indices = set()
     invalid_classes = []
-    logger.info(f"Attempting to filter for: {args.classes}")
-    for name in args.classes:
-        if name in class_name_to_id:
-            filter_class_indices.add(class_name_to_id[name])
-        else:
-            invalid_classes.append(name)
+    valid_classes_found = False
+    logger.info(f"Attempting to filter for requested classes: {requested_classes}")
+    
+    # Check for fallback: single class model and 'person' was requested (default or explicit)
+    if num_classes == 1 and 'person' in requested_classes and 'person' not in class_name_to_id:
+        single_class_name = class_names[0]
+        logger.warning(f"Model has only 1 class ('{single_class_name}'). Requested 'person' is invalid.")
+        logger.warning(f"Automatically falling back to filter for the single detected class: '{single_class_name}'.")
+        filter_class_indices.add(0) # Add index 0 for the single class
+        valid_classes_found = True
+        # Remove 'person' from invalid list if it was the only one requested
+        if 'person' in invalid_classes:
+             invalid_classes.remove('person')
+    else:
+        # Normal processing for multi-class or if fallback didn't apply
+        for name in requested_classes:
+            if name in class_name_to_id:
+                filter_class_indices.add(class_name_to_id[name])
+                valid_classes_found = True
+            else:
+                invalid_classes.append(name)
+
     if invalid_classes:
         logger.warning(f"Invalid class names provided for filtering: {', '.join(invalid_classes)}. Ignoring them.")
         logger.warning(f"Valid class names for this model are: {', '.join(class_names)}")
-    if not filter_class_indices:
-        logger.error("No valid classes specified for filtering. Cannot proceed.")
+        
+    if not valid_classes_found:
+        logger.error("No valid classes specified or found after fallback. Cannot proceed.")
         logger.error(f"Please provide valid class names from: {', '.join(class_names)}")
-        exit() # Exit if no valid classes remain after filtering
+        exit()
     else:
          logger.info(f"Successfully set filter for classes: {[class_names[i] for i in filter_class_indices]} (Indices: {filter_class_indices})")
 
@@ -277,13 +249,9 @@ if __name__ == '__main__':
     logger.info(f"Found {len(image_files)} images in {args.dataset_path}")
 
     # --- Benchmarking --- 
-    total_preprocess_time_ms = 0
-    total_inference_time_ms = 0
-    total_postprocess_time_ms = 0
-    processed_image_count = 0
-    successful_processing_count = 0
+    total_preprocess_time_ms, total_inference_time_ms, total_postprocess_time_ms = 0, 0, 0
+    processed_image_count, successful_processing_count = 0, 0
 
-    # Optional: Warm-up run
     logger.info("Performing warm-up inference...")
     _ = benchmark_inference(interpreter, image_files[0], args.input_shape, args.score_thr, num_classes, reg_max, class_names, filter_class_indices)
     logger.info("Warm-up complete.")
@@ -292,14 +260,12 @@ if __name__ == '__main__':
     for image_path in image_files:
         logger.info(f"Processing: {os.path.basename(image_path)}")
         lat_pre, lat_inf, lat_post, result_img = benchmark_inference(interpreter, image_path, args.input_shape, args.score_thr, num_classes, reg_max, class_names, filter_class_indices)
-
         processed_image_count += 1
         if lat_pre is not None and lat_inf is not None and lat_post is not None:
             total_preprocess_time_ms += lat_pre
             total_inference_time_ms += lat_inf
             total_postprocess_time_ms += lat_post
             successful_processing_count += 1
-
             if result_img is not None and args.output_path:
                 output_filename = os.path.join(args.output_path, os.path.basename(image_path))
                 try:
@@ -316,7 +282,6 @@ if __name__ == '__main__':
         avg_latency_inference_ms = total_inference_time_ms / successful_processing_count
         avg_latency_postprocess_ms = total_postprocess_time_ms / successful_processing_count
         avg_latency_total_ms = avg_latency_preprocess_ms + avg_latency_inference_ms + avg_latency_postprocess_ms
-
         fps_inference = 1000 / avg_latency_inference_ms if avg_latency_inference_ms > 0 else 0
         fps_total = 1000 / avg_latency_total_ms if avg_latency_total_ms > 0 else 0
 
@@ -328,7 +293,6 @@ if __name__ == '__main__':
         logger.info(f"Images Successfully Benchmarked: {successful_processing_count}")
         logger.info(f"Input Shape: {args.input_shape}")
         logger.info(f"Score Threshold: {args.score_thr}")
-        # Always report the classes being filtered, even if default
         logger.info(f"Filtered Classes: {[class_names[i] for i in filter_class_indices]}")
         logger.info(f"Average Preprocessing Latency: {avg_latency_preprocess_ms:.2f} ms")
         logger.info(f"Average Inference Latency: {avg_latency_inference_ms:.2f} ms")
