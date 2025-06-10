@@ -10,7 +10,7 @@ from loguru import logger
 
 # Assuming utils.py is in the same directory or accessible in the Python path
 # Using the ORIGINAL utils.py from the repository
-from utils.utils import image_preprocess, post_process, visualize
+from utils.utils_fixed import image_preprocess, post_process, visualize
 
 # Default COCO class names (80 classes) - Used if model detection fails or for reference
 COCO_CLASS_NAMES = [
@@ -152,7 +152,8 @@ def benchmark_inference(interpreter, image_path, input_shape, score_threshold, n
             if filtered_results and 0 in filtered_results and filtered_results[0]:
                  logger.debug(f"Visualizing filtered detections for {len(filtered_results[0])} classes.")
                  # Pass the potentially overridden class_names list to visualize
-                 result_image = visualize(filtered_results[0], origin_img.copy(), class_names, score_threshold)
+                 # Pass the input_shape to ensure proper scaling
+                 result_image = visualize(filtered_results[0], origin_img.copy(), class_names, score_threshold, model_input_size=input_shape)
             else:
                  logger.debug(f"No detections found after filtering or postprocessing returned empty for {image_path}")
                  result_image = origin_img.copy()
