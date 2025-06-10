@@ -295,17 +295,33 @@ def post_process(preds, num_classes, reg_max, input_size):
     return det_results
 
 
-def overlay_bbox_cv(img, dets, class_names, score_thresh):
+def overlay_bbox_cv(img, dets, class_names, score_thresh, model_input_size):
+    """
+    Draw bounding boxes on the image with proper scaling based on model input size.
+    
+    Args:
+        img: Original image
+        dets: Detection results
+        class_names: List of class names
+        score_thresh: Score threshold for filtering detections
+        model_input_size: The input size used for the model (height, width)
+    """
     all_box = []
     src_height, src_width = img.shape[:2]
-    h_ratio = src_height / 320
-    w_ratio = src_width / 320
+    model_height, model_width = model_input_size
+    
+    # Calculate scaling ratios between original image and model input
+    h_ratio = src_height / model_height
+    w_ratio = src_width / model_width
 
     for label in dets:
         for bbox in dets[label]:
             score = bbox[-1]
             if score > score_thresh:
+                # Get coordinates from model output (relative to model input size)
                 x0, y0, x1, y1 = [int(i) for i in bbox[:4]]
+                
+                # Scale coordinates to match original image dimensions
                 x0 = int(x0 * w_ratio)
                 y0 = int(y0 * h_ratio)
                 x1 = int(x1 * w_ratio)
@@ -329,17 +345,17 @@ def overlay_bbox_cv(img, dets, class_names, score_thresh):
     return img
 
 
-def show_result(img, dets, class_names, score_thres=0.3, show=True, save_path=None):
-    result = overlay_bbox_cv(img, dets, class_names, score_thresh=score_thres)
+def show_result(img, dets, class_names, score_thres=0.3, model_input_size=(320, 320), show=True, save_path=None):
+    result = overlay_bbox_cv(img, dets, class_names, score_thresh=score_thres, model_input_size=model_input_size)
     if show:
         cv2.imshow("det", result)
         cv2.waitKey(0)
     return result
 
-def visualize(dets, origin_img, class_names, score_thres, wait=0):
+def visualize(dets, origin_img, class_names, score_thres, model_input_size=(320, 320), wait=0):
         # time1 = time.time()
         result_img = show_result(
-            origin_img, dets, class_names, score_thres=score_thres, show=False
+            origin_img, dets, class_names, score_thres=score_thres, model_input_size=model_input_size, show=False
         )
         # print("viz time: {:.3f}s".format(time.time() - time1))
         return result_img
